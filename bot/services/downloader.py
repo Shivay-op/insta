@@ -1,16 +1,22 @@
 import os
 import tempfile
-import requests
-
+import time
 from io import BytesIO
+
+import requests
 from yt_dlp import YoutubeDL
 
 from config import COBALT_API, API, MAX_MEMORY_SIZE
 
 
-def get_cobalt_url(url):
+# =========================================================
+# COBALT
+# =========================================================
 
+def get_cobalt_url(url):
     try:
+        print("Using Cobalt...")
+
         r = requests.post(
             COBALT_API,
             json={
@@ -18,9 +24,9 @@ def get_cobalt_url(url):
             },
             headers={
                 "Accept": "application/json",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
-            timeout=(3, 15)
+            timeout=(10, 30),
         )
 
         print("Cobalt response:", r.text)
@@ -29,33 +35,44 @@ def get_cobalt_url(url):
 
         data = r.json()
 
-        if data.get("status") in [
-            "tunnel",
-            "redirect"
-        ]:
+        status = data.get("status")
+
+        # Direct/tunnel URL
+        if status in ("redirect", "tunnel"):
             return data.get("url")
 
-        if data.get("status") == "picker":
+        # Picker response
+        if status == "picker":
+
             for item in data.get("picker", []):
+
                 if item.get("type") == "video":
                     return item.get("url")
 
     except Exception as e:
-        print("Cobalt error:", e)
+
+        print(
+            "Cobalt error:",
+            repr(e)
+        )
 
     return None
 
 
+# =========================================================
+# API FALLBACK
+# =========================================================
 
 def get_api_url(url):
-
     try:
+        print("Using API...")
+
         r = requests.get(
             API,
             params={
                 "url": url
             },
-            timeout=(10, 60)
+            timeout=(10, 60),
         )
 
         r.raise_for_status()
@@ -63,174 +80,598 @@ def get_api_url(url):
         data = r.json()
 
         if data.get("status"):
-            return data["data"]["media"]["download"]
+
+            return data[
+                "data"
+            ][
+                "media"
+            ][
+                "download"
+            ]
 
     except Exception as e:
-        print("API error:", e)
+
+        print(
+            "API error:",
+            repr(e)
+        )
 
     return None
 
 
+# =========================================================
+# YT-DLP URL
+# =========================================================
 
 def get_ytdlp_url(url):
 
     try:
 
+        print("Using yt-dlp...")
+
         options = {
             "quiet": True,
             "noplaylist": True,
-            "format": "best[ext=mp4]/best",
-            "socket_timeout": 15,
-            "retries": 2,
-            "extractor_retries": 1,
-            "fragment_retries": 2
-        }
 
+            # Prefer MP4
+            "format": (
+                "best[ext=mp4]/"
+                "best"
+            ),
+
+            "socket_timeout": 30,
+
+            "retries": 5,
+
+            "extractor_retries": 3,
+
+            "fragment_retries": 5,
+
+            # 10 MB HTTP chunks
+            "http_chunk_size": 10 * 1024 * 1024,
+        }
 
         with YoutubeDL(options) as ydl:
 
             info = ydl.extract_info(
                 url,
-                download=False
+                download=False,
             )
 
+        if not info:
+            return None
 
-        return info.get("url")
+        video_url = info.get("url")
 
+        if video_url:
+            print("yt-dlp URL obtained.")
+
+        return video_url
 
     except Exception as e:
-        print("yt-dlp error:", e)
+
+        print(
+            "yt-dlp error:",
+            repr(e)
+        )
 
     return None
 
 
+# =========================================================
+# YT-DLP DOWNLOAD COMPATIBILITY FUNCTION
+# =========================================================
+
+def download_ytdlp(url):
+
+    """
+    Compatibility function for existing link.py.
+
+    Gets a direct video URL using yt-dlp,
+    then downloads it using download_video().
+    """
+
+    print("Starting yt-dlp download...")
+
+    video_url = get_ytdlp_url(url)
+
+    if not video_url:
+
+        print(
+            "yt-dlp could not find video URL."
+        )
+
+        return None, None
+
+    return download_video(
+        video_url
+    )
+
+
+# =========================================================
+# GET VIDEO URL
+# =========================================================
 
 def get_video_url(url):
 
-    # 1. Self hosted Cobalt
+    # -----------------------------------------------------
+    # 1. Cobalt
+    # -----------------------------------------------------
+
     video = get_cobalt_url(url)
 
     if video:
+
+        print(
+            "Cobalt URL obtained."
+        )
+
         return video
 
+    # -----------------------------------------------------
+    # 2. API
+    # -----------------------------------------------------
 
-    # 2. Your existing API
+    print(
+        "Cobalt failed."
+    )
+
     video = get_api_url(url)
 
     if video:
+
+        print(
+            "API URL obtained."
+        )
+
         return video
 
+    # -----------------------------------------------------
+    # 3. yt-dlp
+    # -----------------------------------------------------
 
-    # 3. yt-dlp fallback
+    print(
+        "API failed."
+    )
+
     video = get_ytdlp_url(url)
+
+    if video:
+
+        print(
+            "yt-dlp URL obtained."
+        )
 
     return video
 
 
+# =========================================================
+# DOWNLOAD VIDEO
+# =========================================================
 
-def download_video(video_url):
+def download_video(
+    video_url,
+    max_retries=5
+):
+
+    """
+    Download direct video URL.
+
+    Small files:
+        BytesIO
+
+    Large files:
+        temporary .mp4 file
+
+    Returns:
+
+        (video_object, temp_path)
+
+    """
+
+    headers = {
+
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+
+        "Accept": "*/*",
+
+        "Accept-Encoding": "identity",
+
+        "Connection": "keep-alive",
+    }
+
+    temp_path = None
 
     try:
-        headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0 Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Accept-Encoding": "identity",
-    "Connection": "keep-alive"
-}
 
-        r = requests.get(
-            video_url,
-            headers=headers,
-            stream=True,
-            timeout=(30, 600)
+        # -------------------------------------------------
+        # Create temporary file
+        # -------------------------------------------------
+
+        temp_file = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".mp4",
         )
 
-        r.raise_for_status()
+        temp_path = temp_file.name
 
+        temp_file.close()
 
-        memory = BytesIO()
+        downloaded = 0
 
-        temp = None
+        # -------------------------------------------------
+        # Retry loop
+        # -------------------------------------------------
 
-        size = 0
-
-
-        for chunk in r.iter_content(
-            chunk_size=1024 * 1024
+        for attempt in range(
+            1,
+            max_retries + 1
         ):
 
-            if not chunk:
-                continue
+            print(
+                f"Download attempt "
+                f"{attempt}/{max_retries}"
+            )
 
+            try:
 
-            size += len(chunk)
+                request_headers = headers.copy()
 
+                # -----------------------------------------
+                # Resume download
+                # -----------------------------------------
 
-            # Store small files in memory
-            if temp is None and size <= MAX_MEMORY_SIZE:
+                if downloaded > 0:
 
-                memory.write(chunk)
-
-
-            else:
-
-                # Move to disk for large files
-                if temp is None:
-
-                    temp = tempfile.NamedTemporaryFile(
-                        delete=False,
-                        suffix=".mp4"
+                    request_headers[
+                        "Range"
+                    ] = (
+                        f"bytes={downloaded}-"
                     )
 
-                    memory.seek(0)
-
-                    temp.write(
-                        memory.read()
+                    print(
+                        "Resuming from:",
+                        f"{downloaded / 1024 / 1024:.2f} MB"
                     )
 
-                    memory.close()
+                # -----------------------------------------
+                # Request
+                # -----------------------------------------
 
+                with requests.get(
+                    video_url,
+                    headers=request_headers,
+                    stream=True,
+                    timeout=(60, 1800),
+                    allow_redirects=True,
+                ) as r:
 
-                temp.write(chunk)
+                    print(
+                        "HTTP status:",
+                        r.status_code
+                    )
 
+                    r.raise_for_status()
 
+                    # -------------------------------------
+                    # Server ignored Range
+                    # -------------------------------------
 
-        # Small file
-        if temp is None:
+                    if (
+                        downloaded > 0
+                        and r.status_code == 200
+                    ):
 
-            memory.seek(0)
+                        print(
+                            "Server ignored Range."
+                        )
 
-            memory.name = "video.mp4"
+                        print(
+                            "Restarting download..."
+                        )
 
-            return memory, None
+                        downloaded = 0
 
+                        with open(
+                            temp_path,
+                            "wb",
+                        ):
+                            pass
 
+                    # -------------------------------------
+                    # File mode
+                    # -------------------------------------
 
-        # Large file
-        temp.close()
+                    if downloaded > 0:
+                        mode = "ab"
+                    else:
+                        mode = "wb"
 
-        return temp.name, temp.name
+                    # -------------------------------------
+                    # Write chunks
+                    # -------------------------------------
 
+                    with open(
+                        temp_path,
+                        mode,
+                    ) as f:
 
+                        for chunk in r.iter_content(
+                            chunk_size=1024 * 1024
+                        ):
+
+                            if not chunk:
+                                continue
+
+                            f.write(chunk)
+
+                            downloaded += len(
+                                chunk
+                            )
+
+                            print(
+                                "\rDownloaded: "
+                                f"{downloaded / 1024 / 1024:.2f} MB",
+                                end="",
+                                flush=True,
+                            )
+
+                print()
+
+                print(
+                    "Download completed."
+                )
+
+                # -----------------------------------------
+                # Verify file
+                # -----------------------------------------
+
+                if not os.path.exists(
+                    temp_path
+                ):
+
+                    raise RuntimeError(
+                        "Downloaded file "
+                        "does not exist."
+                    )
+
+                final_size = os.path.getsize(
+                    temp_path
+                )
+
+                print(
+                    "Final file size:",
+                    f"{final_size / 1024 / 1024:.2f} MB"
+                )
+
+                if final_size <= 0:
+
+                    raise RuntimeError(
+                        "Downloaded file is empty."
+                    )
+
+                # -----------------------------------------
+                # Small file -> RAM
+                # -----------------------------------------
+                print("Video stored on disk.")
+                return temp_path, temp_path
+
+       
+                # -----------------------------------------
+                # Large file -> disk
+                # -----------------------------------------
+
+                print(
+                    "Video stored on disk."
+                )
+
+                return (
+                    temp_path,
+                    temp_path
+                )
+
+            # -------------------------------------------------
+            # Connection timeout / disconnect
+            # -------------------------------------------------
+
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as e:
+
+                print()
+
+                print(
+                    "Connection error:",
+                    repr(e)
+                )
+
+                # -----------------------------------------
+                # Get actual downloaded size
+                # -----------------------------------------
+
+                if os.path.exists(
+                    temp_path
+                ):
+
+                    downloaded = os.path.getsize(
+                        temp_path
+                    )
+
+                print(
+                    "Downloaded so far:",
+                    f"{downloaded / 1024 / 1024:.2f} MB"
+                )
+
+                # -----------------------------------------
+                # Last attempt
+                # -----------------------------------------
+
+                if attempt >= max_retries:
+
+                    raise
+
+                wait = min(
+                    2 ** (attempt - 1),
+                    30,
+                )
+
+                print(
+                    f"Retrying in {wait} seconds..."
+                )
+
+                time.sleep(
+                    wait
+                )
+
+        raise RuntimeError(
+            "Maximum download retries exceeded."
+        )
 
     except Exception as e:
 
-        print("Download error:", e)
+        print(
+            "Download error:",
+            repr(e)
+        )
 
-        return None, None
+        # -------------------------------------------------
+        # Cleanup
+        # -------------------------------------------------
+
+        if temp_path:
+
+            try:
+
+                if os.path.exists(
+                    temp_path
+                ):
+
+                    os.remove(
+                        temp_path
+                    )
+
+            except Exception as cleanup_error:
+
+                print(
+                    "Cleanup error:",
+                    repr(cleanup_error)
+                )
+
+        return (
+            None,
+            None
+        )
 
 
+# =========================================================
+# COMPLETE PROCESS
+# =========================================================
+
+def process_video(url):
+
+    """
+    Complete downloader:
+
+        Facebook/Instagram URL
+                ↓
+             Cobalt
+                ↓
+              API
+                ↓
+             yt-dlp
+                ↓
+             Download
+    """
+
+    print(
+        "================================"
+    )
+
+    print(
+        "Getting video URL..."
+    )
+
+    print(
+        "================================"
+    )
+
+    video_url = get_video_url(
+        url
+    )
+
+    if not video_url:
+
+        print(
+            "Could not obtain video URL."
+        )
+
+        return (
+            None,
+            None
+        )
+
+    print(
+        "Video URL obtained."
+    )
+
+    # -----------------------------------------------------
+    # Download
+    # -----------------------------------------------------
+
+    video, temp_path = download_video(
+        video_url
+    )
+
+    if video is None:
+
+        print(
+            "Video download failed."
+        )
+
+        return (
+            None,
+            None
+        )
+
+    print(
+        "Video ready."
+    )
+
+    return (
+        video,
+        temp_path
+    )
+
+
+# =========================================================
+# DELETE TEMP FILE
+# =========================================================
 
 def delete_temp(path):
 
-    if path and os.path.exists(path):
+    if not path:
+        return
 
-        try:
+    try:
+
+        if os.path.exists(path):
+
             os.remove(path)
 
-        except Exception as e:
-            print("Delete error:", e)
+            print(
+                "Temporary file deleted."
+            )
+
+    except Exception as e:
+
+        print(
+            "Delete error:",
+            repr(e)
+        )
