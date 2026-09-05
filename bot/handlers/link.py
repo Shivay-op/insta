@@ -1,35 +1,29 @@
 import os
 import telebot
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    TimeoutError as FuturesTimeoutError
+
+from concurrent.futures import ThreadPoolExecutor
+
+from config import (
+    BOT_USERNAME,
+    MAX_WORKERS,
+    CHANNEL,
+    SUPPORT,
 )
 
-from config import BOT_USERNAME, MAX_WORKERS, CHANNEL, SUPPORT
 from bot.keyboards import video_buttons
-from bot.services.downloader import get_video_url, download_video, delete_temp
+
+from bot.services.downloader import (
+    get_video_url,
+    download_video,
+    delete_temp,
+)
+
 from bot.handlers.join import is_user_joined
 
 
-executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-
-URL_FETCH_TIMEOUT = 45   # seconds to resolve a direct video URL
-DOWNLOAD_TIMEOUT = 120   # seconds to download the video itself
-
-
-def _run_with_timeout(fn, args, timeout):
-    """Run fn(*args) with a hard wall-clock timeout.
-
-    On timeout we stop waiting and report failure immediately instead of
-    leaving the user staring at "Processing..." forever; the underlying
-    call (network I/O we can't interrupt) is left to finish on its own.
-    """
-    worker = ThreadPoolExecutor(max_workers=1)
-    future = worker.submit(fn, *args)
-    try:
-        return future.result(timeout=timeout)
-    finally:
-        worker.shutdown(wait=False)
+executor = ThreadPoolExecutor(
+    max_workers=MAX_WORKERS
+)
 
 
 SUPPORTED_DOMAINS = [
@@ -49,115 +43,314 @@ SUPPORTED_DOMAINS = [
     "soundcloud.com",
     "dailymotion.com",
     "bilibili.com",
-    "streamable.com"
+    "streamable.com",
 ]
 
 
 def register(bot):
 
     def process_reel(message, processing):
+
         video_data = None
+        temp_path = None
+
         try:
-            clean_url = message.text.split("?")[0]
 
-            # 1. Get video URL
-            try:
-                url_result = _run_with_timeout(
-                    get_video_url, (clean_url,), URL_FETCH_TIMEOUT
-                )
-            except FuturesTimeoutError:
-                bot.edit_message_text(
-                    "❌ Timed out fetching this video. Please try again later.",
-                    message.chat.id,
-                    processing.message_id
-                )
-                return
+            # =================================================
+            # Clean URL
+            # =================================================
 
-            video_url = url_result[0] if isinstance(url_result, tuple) else url_result
+            clean_url = (
+                message.text
+                .strip()
+                .split("?")[0]
+            )
+
+            print(
+                "Processing URL:",
+                clean_url
+            )
+
+            # =================================================
+            # STEP 1 - GET VIDEO URL
+            # =================================================
+
+            print(
+                "Getting video URL..."
+            )
+
+            video_url = get_video_url(
+                clean_url
+            )
+
+            if isinstance(
+                video_url,
+                tuple
+            ):
+                video_url = video_url[0]
 
             if not video_url:
+
                 bot.edit_message_text(
-                    "❌ Could not fetch video. Make sure the account is public.",
+                    "❌ Could not fetch this video.\n"
+                    "Make sure the video/account is public.",
                     message.chat.id,
-                    processing.message_id
+                    processing.message_id,
                 )
+
                 return
 
-            # 2. Download video
-            try:
-                download_result = _run_with_timeout(
-                    download_video, (video_url,), DOWNLOAD_TIMEOUT
-                )
-            except FuturesTimeoutError:
+            print(
+                "Video URL received."
+            )
+
+            # =================================================
+            # STEP 2 - DOWNLOAD
+            # =================================================
+
+            print(
+                "Starting download..."
+            )
+
+            download_result = download_video(
+                video_url
+            )
+
+            if not download_result:
+
                 bot.edit_message_text(
-                    "❌ Download took too long. Please try again later.",
+                    "❌ Failed to download the video.\n"
+                    "Please try again later.",
                     message.chat.id,
-                    processing.message_id
+                    processing.message_id,
                 )
+
                 return
 
-            video_data = download_result[0] if isinstance(download_result, tuple) else download_result
+            # =================================================
+            # Extract result
+            # =================================================
+
+            if isinstance(
+                download_result,
+                tuple
+            ):
+
+                video_data = download_result[0]
+
+                temp_path = download_result[1]
+
+            else:
+
+                video_data = download_result
 
             if not video_data:
+
                 bot.edit_message_text(
-                    "❌ Failed to download Reel. Please try again later.",
+                    "❌ Download failed.",
                     message.chat.id,
-                    processing.message_id
+                    processing.message_id,
                 )
+
                 return
 
-            # 3. Send video (Handles both BytesIO memory streams and file paths)
-            if hasattr(video_data, "read"):  # It's a BytesIO / memory stream
+            print(
+                "Video downloaded successfully."
+            )
+
+            # =================================================
+            # STEP 3 - SEND VIDEO
+            # =================================================
+
+            print(
+                "Uploading video to Telegram..."
+            )
+
+            # -------------------------------------------------
+            # BytesIO
+            # -------------------------------------------------
+
+            if hasattr(
+                video_data,
+                "read"
+            ):
+
                 video_data.seek(0)
-                # Telegram requires a filename attribute to recognize it as an MP4
-                if not hasattr(video_data, "name") or not video_data.name:
-                    video_data.name = "reel.mp4"
 
-                bot.send_video(
-                    message.chat.id,
-                    video_data,
-                    caption=f"🚀 Downloaded via {BOT_USERNAME}",
-                    reply_to_message_id=message.message_id,
-                    reply_markup=video_buttons()
-                )
-
-            elif isinstance(video_data, str):  # It's a file path string
-                with open(video_data, "rb") as video:
-                    bot.send_video(
-                        message.chat.id,
-                        video,
-                        caption=f"🚀 Downloaded via {BOT_USERNAME}",
-                        reply_to_message_id=message.message_id,
-                        reply_markup=video_buttons()
+                try:
+                    video_data.name
+                except AttributeError:
+                    video_data.name = (
+                        "reel.mp4"
                     )
 
-            bot.delete_message(message.chat.id, processing.message_id)
+                bot.send_video(
+                    chat_id=message.chat.id,
 
-        except Exception as e:
-            print(f"Error processing reel: {e}")
+                    video=video_data,
+
+                    caption=(
+                        f"🚀 Downloaded via "
+                        f"{BOT_USERNAME}"
+                    ),
+
+                    reply_to_message_id=(
+                        message.message_id
+                    ),
+
+                    reply_markup=video_buttons(),
+
+                    supports_streaming=True,
+                    timeout=1800,
+                )
+
+            # -------------------------------------------------
+            # File path
+            # -------------------------------------------------
+
+            elif isinstance(
+                video_data,
+                str
+            ):
+
+                if not os.path.exists(
+                    video_data
+                ):
+
+                    raise FileNotFoundError(
+                        video_data
+                    )
+
+                with open(
+                    video_data,
+                    "rb"
+                ) as video:
+
+                    bot.send_video(
+                        chat_id=message.chat.id,
+
+                        video=video,
+
+                        caption=(
+                            f"🚀 Downloaded via "
+                            f"{BOT_USERNAME}"
+                        ),
+
+                        reply_to_message_id=(
+                            message.message_id
+                        ),
+
+                        reply_markup=video_buttons(),
+
+                        supports_streaming=True,
+                        timeout=1800,
+                    )
+
+            else:
+
+                raise TypeError(
+                    "Unknown video type: "
+                    f"{type(video_data)}"
+                )
+
+            print(
+                "Telegram upload completed."
+            )
+
+            # =================================================
+            # STEP 4 - DELETE PROCESSING MESSAGE
+            # =================================================
+
             try:
-                bot.edit_message_text(
-                    "❌ Failed to download Reel. Please try again later.",
+
+                bot.delete_message(
                     message.chat.id,
                     processing.message_id
                 )
-            except Exception:
-                pass
+
+            except Exception as e:
+
+                print(
+                    "Could not delete processing message:",
+                    repr(e)
+                )
+
+        except Exception as e:
+
+            print(
+                "Error processing reel:",
+                repr(e)
+            )
+
+            try:
+
+                bot.edit_message_text(
+                    "❌ Failed to download/send the video.\n"
+                    "Please try again later.",
+                    message.chat.id,
+                    processing.message_id,
+                )
+
+            except Exception as edit_error:
+
+                print(
+                    "Error editing message:",
+                    repr(edit_error)
+                )
 
         finally:
-            # 4. Clean up safely
+
+            # =================================================
+            # CLEANUP
+            # =================================================
+
             try:
-                if isinstance(video_data, str) and os.path.exists(video_data):
-                    delete_temp(video_data)
-                elif hasattr(video_data, "close"):
+
+                if temp_path:
+
+                    if os.path.exists(
+                        temp_path
+                    ):
+
+                        delete_temp(
+                            temp_path
+                        )
+
+                elif isinstance(
+                    video_data,
+                    str
+                ):
+
+                    if os.path.exists(
+                        video_data
+                    ):
+
+                        delete_temp(
+                            video_data
+                        )
+
+                elif hasattr(
+                    video_data,
+                    "close"
+                ):
+
                     video_data.close()
+
             except Exception as e:
-                print(f"Cleanup error: {e}")
+
+                print(
+                    "Cleanup error:",
+                    repr(e)
+                )
+
+    # =========================================================
+    # LINK HANDLER
+    # =========================================================
 
     @bot.message_handler(
         func=lambda m: (
-            m.text and
-            any(
+            m.text
+            and any(
                 domain in m.text.lower()
                 for domain in SUPPORTED_DOMAINS
             )
@@ -165,48 +358,72 @@ def register(bot):
     )
     def handle_link(message):
 
-        if not is_user_joined(bot, message.from_user.id):
+        # =====================================================
+        # JOIN CHECK
+        # =====================================================
 
-            markup = telebot.types.InlineKeyboardMarkup()
+        if not is_user_joined(
+            bot,
+            message.from_user.id
+        ):
+
+            markup = (
+                telebot.types
+                .InlineKeyboardMarkup()
+            )
 
             markup.add(
-                telebot.types.InlineKeyboardButton(
+                telebot.types
+                .InlineKeyboardButton(
                     "📢 Join Channel",
-                    url=CHANNEL
+                    url=CHANNEL,
                 )
             )
 
             markup.add(
-                telebot.types.InlineKeyboardButton(
+                telebot.types
+                .InlineKeyboardButton(
                     "💬 Join Support",
-                    url=SUPPORT
+                    url=SUPPORT,
                 )
             )
 
             markup.add(
-                telebot.types.InlineKeyboardButton(
+                telebot.types
+                .InlineKeyboardButton(
                     "✅ I Joined",
-                    callback_data="check_join"
+                    callback_data="check_join",
                 )
             )
 
             bot.reply_to(
                 message,
-                "⚠️ Please join our channel and support group first.\n\n"
-                "After joining, click the button below to verify.",
-                reply_markup=markup
+
+                "⚠️ Please join our channel "
+                "and support group first.\n\n"
+                "After joining, click the "
+                "button below to verify.",
+
+                reply_markup=markup,
             )
 
             return
 
+        # =====================================================
+        # PROCESSING MESSAGE
+        # =====================================================
 
         processing = bot.reply_to(
             message,
             "⏳ Processing your video..."
         )
 
+        # =====================================================
+        # BACKGROUND PROCESS
+        # =====================================================
+
         executor.submit(
             process_reel,
             message,
-            processing
+            processing,
         )
