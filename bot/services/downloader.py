@@ -466,16 +466,6 @@ def download_video(
                 # -----------------------------------------
                 # Large file -> disk
                 # -----------------------------------------
-
-                print(
-                    "Video stored on disk."
-                )
-
-                return (
-                    temp_path,
-                    temp_path
-                )
-
             # -------------------------------------------------
             # Connection timeout / disconnect
             # -------------------------------------------------
