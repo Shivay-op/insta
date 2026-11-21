@@ -145,6 +145,24 @@ If you like this project:
 
 ---
 
-### ❤️ Made with Love for the Telegram Community
+## 🙏 Credits & Acknowledgements
+
+This project is made possible thanks to these amazing open-source projects and services.
+
+- **[Cobalt](https://github.com/imputnet/cobalt)** – An open-source media downloader. Special thanks to the Cobalt developers and contributors.
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** – An excellent command-line audio/video downloader maintained by its developers and contributors.
+- **[APIOR](https://apior.com/)** – Third-party API service used in the project, where applicable.
+- **[Telegram Bot API](https://core.telegram.org/bots/api)** – For providing the Telegram bot platform.
+
+A huge thank you to all the developers and contributors who build and maintain these tools.
+
+### 📜 Open-Source Licenses
+
+Please refer to the original repositories for their respective licenses:
+
+- [Cobalt License](https://github.com/imputnet/cobalt/blob/main/LICENSE)
+- [yt-dlp License](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE)
+
+**Note:** Cobalt and yt-dlp are independent projects. We are not their developers or maintainers and are not affiliated with them.
 
 </div>
